@@ -1,9 +1,16 @@
+import argparse
 import PIL
 import numpy as np
 import torch
 import facer
 
 from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, EulerAncestralDiscreteScheduler
+
+def parse_agrs():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image_path", type=str, help="Input image path")
+    args = parser.parse_args()
+    return args
 
 def resize_for_condition_image(input_image: PIL.Image, resolution: int):
     input_image = input_image.convert("RGB")
@@ -37,32 +44,41 @@ def get_hair_mask(image_path):
     mask_img.show()
     return mask_img
 
-image_path = 'image2.png'
-init_image = PIL.Image.open(image_path)
-mask_image = get_hair_mask(image_path) #PIL.Image.open('mask2.png').convert("RGB")/255.0
+def sd_controlnet_inpaint(init_image, mask_image):
+    prompt = "(high detailed hair:1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
+    lighting, high quality, film grain, Fujifilm XT3"
 
-prompt = "(high detailed hair:1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
-lighting, high quality, film grain, Fujifilm XT3"
-negative_prompt = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
-drawing, anime:1.4), text, close up, cropped, out of frame, worst quality, low \
-quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, \
-mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, \
-blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, \
-disfigured, gross proportions, malformed limbs, missing arms, missing legs, \
-extra arms, extra legs, fused fingers, too many fingers, long neck"
-cond_image = resize_for_condition_image(init_image, 1024)
-mask_image = mask_image.resize((1024, 1024))
+    negative_prompt = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
+    drawing, anime:1.4), text, close up, cropped, out of frame, worst quality, low \
+    quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, \
+    mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, \
+    blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, \
+    disfigured, gross proportions, malformed limbs, missing arms, missing legs, \
+    extra arms, extra legs, fused fingers, too many fingers, long neck"
 
-controlnet = ControlNetModel.from_pretrained(
-    "lllyasviel/control_v11f1e_sd15_tile", torch_dtype=torch.float16
-)
+    cond_image = resize_for_condition_image(init_image, 1024)
+    mask_image = mask_image.resize((1024, 1024))
 
-pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-    "XpucT/Deliberate", controlnet=controlnet, torch_dtype=torch.float16
-).to('cuda')
+    controlnet = ControlNetModel.from_pretrained(
+        "lllyasviel/control_v11f1e_sd15_tile", torch_dtype=torch.float16
+    )
 
-pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=cond_image, image=cond_image, \
-                strength = 1, mask_image=mask_image, num_inference_steps=20, guidance_scale=7, height=1024, width=1024, generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
-image.show()
-image.save('result_' + image_path)
+    pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
+        "XpucT/Deliberate", controlnet=controlnet, torch_dtype=torch.float16
+    ).to('cuda')
+
+    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=cond_image, image=init_image, \
+                    strength = 1, mask_image=mask_image, \
+                    num_inference_steps=20, guidance_scale=7, height=1024, width=1024, 
+                    generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
+    return image
+
+if __name__=="__main__":
+    args = parse_agrs()
+    image_path = args.image_path
+    init_image = PIL.Image.open(image_path).convert("RGB")
+    mask_image = get_hair_mask(image_path)
+    result_image = sd_controlnet_inpaint(init_image, mask_image)
+    result_image.show()
+    result_image.save('result_' + image_path)
