@@ -1,5 +1,7 @@
 import argparse
-import PIL
+import glob
+import os
+from PIL import Image, ImageFilter
 import numpy as np
 import torch
 import facer
@@ -8,11 +10,12 @@ from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel,
 
 def parse_agrs():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image_path", type=str, help="Input image path")
+    parser.add_argument("--image_path", type=str, help="Input image folder path")
+    parser.add_argument("--result_path", type=str, help="Result image folder path")
     args = parser.parse_args()
     return args
 
-def resize_for_condition_image(input_image: PIL.Image, resolution: int):
+def resize_for_condition_image(input_image: Image, resolution: int):
     input_image = input_image.convert("RGB")
     W, H = input_image.size
     k = float(resolution) / min(H, W)
@@ -20,10 +23,10 @@ def resize_for_condition_image(input_image: PIL.Image, resolution: int):
     W *= k
     H = int(round(H / 64.0)) * 64
     W = int(round(W / 64.0)) * 64
-    img = input_image.resize((W, H), resample=PIL.Image.LANCZOS)
+    img = input_image.resize((W, H), resample=Image.LANCZOS)
     return img
 
-def get_hair_mask(image_path):
+def get_hair_mask(image_path, mask_blur = 4):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -40,8 +43,9 @@ def get_hair_mask(image_path):
     mask_img = vis_seg_probs.sum(0, keepdim=True)
     mask_img = vis_seg_probs.cpu().numpy()*255
     mask_img = mask_img.astype(np.uint8)
-    mask_img = PIL.Image.fromarray(mask_img[0])
-    mask_img.show()
+    mask_img = Image.fromarray(mask_img[0])
+    mask_img = mask_img.convert("L")
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(mask_blur))
     return mask_img
 
 def sd_controlnet_inpaint(init_image, mask_image):
@@ -74,11 +78,23 @@ def sd_controlnet_inpaint(init_image, mask_image):
                     generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
     return image
 
-if __name__=="__main__":
-    args = parse_agrs()
-    image_path = args.image_path
-    init_image = PIL.Image.open(image_path).convert("RGB")
+def generate_final_result(image_path):
+    init_image = Image.open(image_path).convert("RGB")
     mask_image = get_hair_mask(image_path)
     result_image = sd_controlnet_inpaint(init_image, mask_image)
-    result_image.show()
-    result_image.save('result_' + image_path)
+    mask = np.array(mask_image.resize((1024, 1024)))/255.0
+    mask = np.expand_dims(mask, axis=2)
+    result = mask * np.array(result_image) + (1 - mask) * np.array(init_image.resize((1024,1024)))
+    result = Image.fromarray(result.astype(np.uint8))
+    return result_image
+
+if __name__=="__main__":
+    args = parse_agrs()
+    image_files  = glob.glob(args.image_path + '/*.png')
+    os.makedirs(args.result_path, exist_ok=True)
+    for image_file in image_files:
+        print(image_file)
+        result =  generate_final_result(image_file)
+        file_name = os.path.basename(image_file)
+        result_file_name = os.path.join(args.result_path, file_name)
+        result.save(result_file_name)
