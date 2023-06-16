@@ -1,13 +1,15 @@
 import argparse
 import glob
+import math
 import os
 from PIL import Image, ImageFilter
 import numpy as np
 import torch
+import cv2
 import facer
-
 from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, EulerAncestralDiscreteScheduler
-
+WIDTH = 512
+HEIGHT = 512
 def parse_agrs():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image_path", type=str, help="Input image folder path")
@@ -15,18 +17,15 @@ def parse_agrs():
     args = parser.parse_args()
     return args
 
-def resize_for_condition_image(input_image: Image, resolution: int):
-    input_image = input_image.convert("RGB")
-    W, H = input_image.size
-    k = float(resolution) / min(H, W)
-    H *= k
-    W *= k
-    H = int(round(H / 64.0)) * 64
-    W = int(round(W / 64.0)) * 64
-    img = input_image.resize((W, H), resample=Image.LANCZOS)
-    return img
-
-def get_hair_mask(image_path, mask_blur = 4):
+def dilate_mask(mask, kernel_size):
+    # Create a kernel for dilation
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    
+    # Perform dilation
+    dilated_mask = cv2.dilate(mask, kernel, iterations=1)
+    
+    return dilated_mask
+def get_hair_mask(image_path, mask_blur = 4, ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -43,54 +42,70 @@ def get_hair_mask(image_path, mask_blur = 4):
     mask_img = vis_seg_probs.sum(0, keepdim=True)
     mask_img = vis_seg_probs.cpu().numpy()*255
     mask_img = mask_img.astype(np.uint8)
+    # print(np.count_nonzero(mask_img == 0))
+    # print(np.count_nonzero(mask_img == 255))
+    hair_over_area = 1/(np.count_nonzero(mask_img == 0)/np.count_nonzero(mask_img == 255))
+    mask_dilate_size = int(hair_over_area * 30 + 5)
+    print(mask_dilate_size)
+    mask_img = np.expand_dims(dilate_mask(np.squeeze(mask_img), mask_dilate_size), 0)
     mask_img = Image.fromarray(mask_img[0])
     mask_img = mask_img.convert("L")
-    mask_img = mask_img.filter(ImageFilter.GaussianBlur(mask_blur))
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(4))
+    #mask_img.show()
     return mask_img
 
-def sd_controlnet_inpaint(init_image, mask_image):
-    prompt = "(high detailed hair:1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
-    lighting, high quality, film grain, Fujifilm XT3"
+def make_inpaint_condition(image, image_mask):
+    image = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+    image_mask = np.array(image_mask.convert("L")).astype(np.float32) / 255.0
 
-    negative_prompt = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
-    drawing, anime:1.4), text, close up, cropped, out of frame, worst quality, low \
+    assert image.shape[0:1] == image_mask.shape[0:1], "image and image_mask must have the same image size"
+    image[image_mask > 0.5] = -1.0  # set as masked pixel
+    image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image)
+    return image
+
+def sd_controlnet_inpaint(init_image, mask_image):
+    prompt = "(round bald head, hairless, smoothy head skin, :1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
+    lighting, high quality, film grain, no hair on the scalp, Fujifilm XT3"
+
+    negative_prompt = "(hair, hat, eyes:1.4), deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
+    drawing, anime,  text, close up, cropped, out of frame, worst quality, low \
     quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, \
     mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, \
     blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, \
     disfigured, gross proportions, malformed limbs, missing arms, missing legs, \
     extra arms, extra legs, fused fingers, too many fingers, long neck"
-
-    cond_image = resize_for_condition_image(init_image, 1024)
-    mask_image = mask_image.resize((1024, 1024))
-
+    control_image = make_inpaint_condition(init_image, mask_image)
     controlnet = ControlNetModel.from_pretrained(
-        "lllyasviel/control_v11f1e_sd15_tile", torch_dtype=torch.float16
-    )
-
+    "lllyasviel/control_v11p_sd15_inpaint", torch_dtype=torch.float16
+)
     pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-        "XpucT/Deliberate", controlnet=controlnet, torch_dtype=torch.float16
-    ).to('cuda')
+    "XpucT/Deliberate", controlnet=controlnet, safety_checker=None, torch_dtype=torch.float16
+)
+    pipe = pipe.to("cuda")
+    #pipe.safety_checker = lambda images, clip_input: (images, False)
 
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-    image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=cond_image, image=init_image, \
+    image = pipe(prompt=prompt, negative_prompt=negative_prompt, image=init_image, \
                     strength = 1, mask_image=mask_image, \
-                    num_inference_steps=20, guidance_scale=7, height=1024, width=1024, 
+                    control_image=control_image, \
+                    num_inference_steps=30, guidance_scale=7.5, height=HEIGHT, width=WIDTH, \
                     generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
     return image
 
 def generate_final_result(image_path):
-    init_image = Image.open(image_path).convert("RGB")
-    mask_image = get_hair_mask(image_path)
+    init_image = Image.open(image_path).convert("RGB").resize((WIDTH, HEIGHT))
+    mask_image = get_hair_mask(image_path).resize((WIDTH, HEIGHT))
     result_image = sd_controlnet_inpaint(init_image, mask_image)
-    mask = np.array(mask_image.resize((1024, 1024)))/255.0
+    mask = np.array(mask_image.resize((WIDTH, HEIGHT)))/255.0
     mask = np.expand_dims(mask, axis=2)
-    result = mask * np.array(result_image) + (1 - mask) * np.array(init_image.resize((1024,1024)))
+    result = mask * np.array(result_image) + (1 - mask) * np.array(init_image.resize((WIDTH,HEIGHT)))
     result = Image.fromarray(result.astype(np.uint8))
-    return result_image
+    return result
 
 if __name__=="__main__":
     args = parse_agrs()
-    image_files  = glob.glob(args.image_path + '/*.png')
+    image_files  = glob.glob(args.image_path + '*.png')
     os.makedirs(args.result_path, exist_ok=True)
     for image_file in image_files:
         print(image_file)
