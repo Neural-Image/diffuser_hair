@@ -86,7 +86,7 @@ def generate_final_result(image_path):
     mask = np.expand_dims(mask, axis=2)
     result = mask * np.array(result_image) + (1 - mask) * np.array(init_image.resize((1024,1024)))
     result = Image.fromarray(result.astype(np.uint8))
-    return result_image
+    return result
 
 if __name__=="__main__":
     args = parse_agrs()
