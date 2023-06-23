@@ -82,20 +82,27 @@ def make_inpaint_condition(image, image_mask):
     image = torch.from_numpy(image)
     return image
 
-def sd_controlnet_inpaint(init_image, mask_image):
-    prompt = "(round bald head, hairless, smoothy head skin, :1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
-    lighting, high quality, film grain, no hair on the scalp, Fujifilm XT3"
+def resize_for_condition_image(input_image: Image, resolution: int):
+    input_image = input_image.convert("RGB")
+    W, H = input_image.size
+    k = float(resolution) / min(H, W)
+    H *= k
+    W *= k
+    H = int(round(H / 64.0)) * 64
+    W = int(round(W / 64.0)) * 64
+    img = input_image.resize((W, H), resample=Image.LANCZOS)
+    return img 
 
-    negative_prompt = "(hair, hat, eyes, wrinkle, bright forehead skin, strong lighting:1.4), deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
-    drawing, anime,  text, close up, cropped, out of frame, worst quality, low \
-    quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, \
-    mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, \
-    blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, \
-    disfigured, gross proportions, malformed limbs, missing arms, missing legs, \
-    extra arms, extra legs, fused fingers, too many fingers, long neck"
-    control_image = make_inpaint_condition(init_image, mask_image)
+
+
+
+def sd_controlnet_inpaint(init_image, mask_image):
+    prompt = "tidy, neat, beautiful, best quality, clear, f/8"
+
+    negative_prompt = "messy, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"
+    control_image = resize_for_condition_image(init_image, WIDTH)
     controlnet = ControlNetModel.from_pretrained(
-    "lllyasviel/control_v11p_sd15_inpaint", torch_dtype=torch.float16
+    "lllyasviel/control_v11f1e_sd15_tile", torch_dtype=torch.float16
 )
     pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
     "XpucT/Deliberate", controlnet=controlnet, safety_checker=None, torch_dtype=torch.float16
@@ -122,7 +129,7 @@ def generate_final_result(image_path):
 
 if __name__=="__main__":
     args = parse_agrs()
-    image_files  = glob.glob(args.image_path + '*.png')
+    image_files  = glob.glob(args.image_path + '/*.png')
     os.makedirs(args.result_path, exist_ok=True)
     for image_file in image_files:
         print(image_file)
