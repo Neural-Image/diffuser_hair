@@ -7,7 +7,7 @@ Generate bald head portrait with Stable Diffusion Inpaint and ControlNet
 Create a conda environment:
 
 ```bash
-conda create -n diffuser -y python==3.8
+conda create -n diffuser -y python==3.10
 ```
 
 The easiest way to install it is using pip:
