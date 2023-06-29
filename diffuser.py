@@ -1,19 +1,22 @@
+import gradio as gr
 import argparse
 import glob
 import os
-from PIL import Image, ImageFilter
+import PIL
+from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 import torch
 import facer
+import cv2
+from pathlib import Path
+import tempfile
+from datetime import datetime
 
-from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, EulerAncestralDiscreteScheduler
+from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, DDIMScheduler, EulerAncestralDiscreteScheduler
 
-def parse_agrs():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image_path", type=str, help="Input image folder path")
-    parser.add_argument("--result_path", type=str, help="Result image folder path")
-    args = parser.parse_args()
-    return args
+from controlnet_aux import OpenposeDetector
+#from clothing_inpaint import get_head_mask, sd_controlnet_inpaint
+
 
 def resize_for_condition_image(input_image: Image, resolution: int):
     input_image = input_image.convert("RGB")
@@ -26,75 +29,159 @@ def resize_for_condition_image(input_image: Image, resolution: int):
     img = input_image.resize((W, H), resample=Image.LANCZOS)
     return img
 
-def get_hair_mask(image_path, mask_blur = 4):
+
+def make_inpaint_condition(image, image_mask):
+    image = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+    image_mask = np.array(image_mask.convert("L")).astype(np.float32) / 255.0
+    assert image.shape[0:1] == image_mask.shape[0:1], "image and image_mask must have the same image size"
+    image[image_mask > 0.5] = -1.0  # set as masked pixel
+    image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image)
+    return image
+
+
+def get_head_mask(image_path, mask_blur = 50, include_hair=True):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
     with torch.inference_mode():
         faces = face_detector(image)
-    face_parser = facer.face_parser('farl/lapa/448', device=device) # optional "farl/celebm/448"
+    face_parser = facer.face_parser('farl/lapa/448', device=device)  # optional "farl/celebm/448"
     with torch.inference_mode():
         faces = face_parser(image, faces)
     seg_logits = faces['seg']['logits']
     seg_probs = seg_logits.softmax(dim=1)  # nfaces x nclasses x h x w
-    vis_seg_probs = seg_probs.argmax(dim=1)#/n_classes*255
-    vis_seg_probs[vis_seg_probs != 10] = 0
-    vis_seg_probs[vis_seg_probs == 10] = 1
-    mask_img = vis_seg_probs.sum(0, keepdim=True)
-    mask_img = vis_seg_probs.cpu().numpy()*255
+    vis_seg_probs = seg_probs.argmax(dim=1)
+    # Include face, (hair) and face parts in the mask
+    #1: Face, 2: Left Eyebrow, 3: Right Eyebrow, 4: Left Eye, 5: Right Eye, 6: Nose, 7: Upper Lip, 8: Inner Mouth, 9: Lower Lip, 10: Hair
+    mask = ((vis_seg_probs == 1) | 
+            (vis_seg_probs == 2) | (vis_seg_probs == 3) |
+            (vis_seg_probs == 4) | (vis_seg_probs == 5) |
+            (vis_seg_probs == 6) | (vis_seg_probs == 7) |
+            (vis_seg_probs == 8) | (vis_seg_probs == 9))
+
+    if not include_hair:
+        mask = mask | (vis_seg_probs == 10)
+
+
+    mask_img = mask.float().cpu().numpy()*255
     mask_img = mask_img.astype(np.uint8)
     mask_img = Image.fromarray(mask_img[0])
     mask_img = mask_img.convert("L")
+
+
     mask_img = mask_img.filter(ImageFilter.GaussianBlur(mask_blur))
+    mask_img = PIL.ImageOps.invert(mask_img)
+    #mask_img.show()
     return mask_img
 
-def sd_controlnet_inpaint(init_image, mask_image):
-    prompt = "(high detailed hair:1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
-    lighting, high quality, film grain, Fujifilm XT3"
 
-    negative_prompt = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
-    drawing, anime:1.4), text, close up, cropped, out of frame, worst quality, low \
-    quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, \
-    mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, \
-    blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, \
-    disfigured, gross proportions, malformed limbs, missing arms, missing legs, \
-    extra arms, extra legs, fused fingers, too many fingers, long neck"
+def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
 
-    cond_image = resize_for_condition_image(init_image, 1024)
-    mask_image = mask_image.resize((1024, 1024))
+    openpose = OpenposeDetector.from_pretrained('lllyasviel/ControlNet')
+    control_openpose_image = openpose(init_image, hand_and_face=True)
+    #print(control_openpose_image.size)
+    #cond_image = resize_for_condition_image(condition_image, 512)
+    #mask_image = resize_for_condition_image(mask_image, 512)
 
-    controlnet = ControlNetModel.from_pretrained(
-        "lllyasviel/control_v11f1e_sd15_tile", torch_dtype=torch.float16
-    )
+    control_inpaint_image = make_inpaint_condition(init_image, mask_image)
+    #print(control_inpaint_image.size())
+
+    #control_openpose_image.resize((512, 768), resample=Image.LANCZOS)
+    #control_inpaint_image.resize((512, 768), resample=Image.LANCZOS)
+
+    controlnet = [
+        ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_openpose", torch_dtype=torch.float16),
+        ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_inpaint", torch_dtype=torch.float16),
+    ]
+
+
+    repo_id = "Lykon/DreamShaper"
 
     pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-        "XpucT/Deliberate", controlnet=controlnet, torch_dtype=torch.float16
+        repo_id, controlnet=controlnet, torch_dtype=torch.float16
     ).to('cuda')
 
+
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-    image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=cond_image, image=init_image, \
-                    strength = 1, mask_image=mask_image, \
-                    num_inference_steps=20, guidance_scale=7, height=1024, width=1024, 
-                    generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
+    pipe.enable_xformers_memory_efficient_attention()
+    pipe.enable_model_cpu_offload()
+
+    image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=[control_openpose_image, control_inpaint_image], image=init_image, \
+                strength = 1, mask_image=mask_image, \
+                num_inference_steps=40, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
+                generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
+
     return image
 
-def generate_final_result(image_path):
-    init_image = Image.open(image_path).convert("RGB")
-    mask_image = get_hair_mask(image_path)
-    result_image = sd_controlnet_inpaint(init_image, mask_image)
-    mask = np.array(mask_image.resize((1024, 1024)))/255.0
-    mask = np.expand_dims(mask, axis=2)
-    result = mask * np.array(result_image) + (1 - mask) * np.array(init_image.resize((1024,1024)))
-    result = Image.fromarray(result.astype(np.uint8))
-    return result
 
-if __name__=="__main__":
-    args = parse_agrs()
-    image_files  = glob.glob(args.image_path + '/*.png')
-    os.makedirs(args.result_path, exist_ok=True)
-    for image_file in image_files:
-        print(image_file)
-        result =  generate_final_result(image_file)
-        file_name = os.path.basename(image_file)
-        result_file_name = os.path.join(args.result_path, file_name)
-        result.save(result_file_name)
+def concatenate_images(images):
+    widths, heights = zip(*(i.size for i in images))
+    total_width = max(widths)
+    total_height = sum(heights)
+    new_img = Image.new('RGB', (total_width, total_height))
+
+    y_offset = 0
+    for img in images:
+        new_img.paste(img, (0,y_offset))
+        y_offset += img.height
+    return new_img
+
+
+
+def inpaint(image, include_hair, prompts, negative_prompt):
+    # Convert the input NumPy array to a PIL Image
+    init_image = Image.fromarray(image).convert("RGB")
+
+    # Save the image to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
+        init_image.save(temp.name)
+        temp.close()  # Close the file so it can be opened by another process
+
+    # Now pass the file path to get_head_mask
+    mask_image = get_head_mask(temp.name, include_hair=include_hair)
+
+    # Split the prompts and negative_prompts by line
+    prompts = prompts.split('\n')
+
+    result_images = []
+
+    for idx, prompt in enumerate(prompts):
+        result_image = sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt)
+        result_images.append(result_image)
+
+        # Generate a timestamp for the filename
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        # Save each individual image in the 'output/images' folder
+        result_image.save(f'output/images/image_{idx+1}_{timestamp}.png', 'PNG')
+
+    openpose = OpenposeDetector.from_pretrained('lllyasviel/ControlNet')
+    condition_image = openpose(init_image, hand_and_face=True)
+    result_images.append(condition_image)  # Append the condition image to the end of the list
+
+    # Clean up the temporary file
+    os.remove(temp.name)
+
+    # Concatenate the result images into a single image
+    output_image = concatenate_images(result_images)
+
+    # Save the concatenated image in the 'output/image_grids' folder
+    output_image.save(f'output/image_grids/concatenated_image_{timestamp}.png', 'PNG')
+
+    return output_image
+
+
+
+iface = gr.Interface(
+    fn=inpaint, 
+    inputs=[
+        gr.inputs.Image(source="upload"),
+        gr.inputs.Checkbox(label="Change Hair"),
+        gr.inputs.Textbox(lines=10, label="Prompts"),
+        gr.inputs.Textbox(lines=4, label="Negative Prompts", default="NSFW, nudity, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
+    ], 
+    outputs=gr.outputs.Image(type='pil', label="Output Image"),
+)
+
+iface.launch()
