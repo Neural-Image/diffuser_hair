@@ -65,7 +65,9 @@ def get_hair_mask(image_path):
         print(middle_face_y)
         face_left_point = pts[0:1,:]
         face_right_point = pts[16:17,:]
-        face_horizontal_size = face_right_point[0][0] - face_left_point[0][0]
+        face_right_x = int(face_right_point[0][0])
+        face_left_x = int(face_left_point[0][0])
+        face_horizontal_size = face_right_x - face_left_x
         pts = pts[9:15,:]
         divider = int(face_horizontal_size // 30)
         left_half_face[:,0] = left_half_face[:,0] + divider
@@ -101,6 +103,9 @@ def get_hair_mask(image_path):
     face_pixel = np.count_nonzero(lower_face_mask == 255)
     #Get hair mask
     hair_mask = get_specific_mask(vis_seg_probs, 10, 10)
+    #Get ear mask
+    ear_mask = get_specific_mask(vis_seg_probs, 1, 1)
+    ear_mask[:,:,face_left_x:face_right_x] = 0
     #Check wheather 12 face points r in hair region
     face_points = np.zeros_like(hair_mask)
     face_points[:,face_pts_rows,face_pts_cols] = 1
@@ -125,9 +130,15 @@ def get_hair_mask(image_path):
     mask_img[eye_mask == 255] = 0
     mask_img[eye_brow_mask == 255] = 0
     mask_img[lower_face_mask == 255] = 0
+    if lower_hair_pp > 0.1:
+        mask_img[ear_mask==255] = 255
     mask_img = Image.fromarray(mask_img[0])
     mask_img = mask_img.convert("L")
     mask_img = mask_img.filter(ImageFilter.GaussianBlur(dilate_kernal_size//2))
+    # ear_mask = Image.fromarray(ear_mask[0])
+    # ear_mask = ear_mask.convert("L")
+    # ear_mask.show()
+    #mask_img.show()
     return mask_img
 
 def make_inpaint_condition(image, image_mask):
