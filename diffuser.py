@@ -2,7 +2,7 @@ import argparse
 import glob
 import math
 import os
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
 import torch
 import cv2
@@ -19,6 +19,15 @@ def parse_agrs():
     parser.add_argument("-o", "--output_path", type=str, help="Result image folder path")
     args = parser.parse_args()
     return args
+
+def facial_dermabrasion_effect(img):
+    blur_img = cv2.bilateralFilter(img, 50, 100, 50)
+    result_img = Image.fromarray(blur_img)
+    enh_img = ImageEnhance.Sharpness(result_img)
+    image_sharped = enh_img.enhance(1.5)
+    con_img = ImageEnhance.Contrast(image_sharped)
+    image_con = con_img.enhance(1.15)
+    return image_con
 
 def erode_mask(mask, kernel_size):
     # Create a kernel for dilation
@@ -59,10 +68,8 @@ def get_hair_mask(image_path):
         left_half_face = pts[2:8,:]
         right_half_face = pts[9:15,:]
         jaw_point_y = int(pts[8:9,:][0][1])
-        print(jaw_point_y)
         middle_face_y = pts[[2,14],:]
         middle_face_y = int((middle_face_y[0][1] + middle_face_y[1][1])//2)
-        print(middle_face_y)
         face_left_point = pts[0:1,:]
         face_right_point = pts[16:17,:]
         face_right_x = int(face_right_point[0][0])
@@ -105,7 +112,7 @@ def get_hair_mask(image_path):
     hair_mask = get_specific_mask(vis_seg_probs, 10, 10)
     #Get ear mask
     ear_mask = get_specific_mask(vis_seg_probs, 1, 1)
-    ear_mask[:,:,face_left_x:face_right_x] = 0
+    ear_mask[0,:,face_left_x:face_right_x] = 0
     #Check wheather 12 face points r in hair region
     face_points = np.zeros_like(hair_mask)
     face_points[:,face_pts_rows,face_pts_cols] = 1
@@ -125,7 +132,11 @@ def get_hair_mask(image_path):
     mask_img = np.expand_dims(dilate_mask(np.squeeze(hair_mask[0]), mask_dilate_size), 0)
     eye_mask = np.expand_dims(dilate_mask(np.squeeze(eye_mask[0]), dilate_kernal_size//2), 0)
     lower_face_mask = np.expand_dims(erode_mask(np.squeeze(lower_face_mask[0]), int(2* dilate_kernal_size)), 0)
+    upper_face_mask = np.expand_dims(upper_face_mask[0,:,:],0)
+    eye_brow_mask = np.expand_dims(eye_brow_mask [0,:,:],0)
+    ear_mask = np.expand_dims(ear_mask [0,:,:],0)
     #Mask out the eye area in the final mask
+    #print(upper_face_mask.shape)
     mask_img[upper_face_mask==255] = 255
     mask_img[eye_mask == 255] = 0
     mask_img[eye_brow_mask == 255] = 0
@@ -151,8 +162,7 @@ def make_inpaint_condition(image, image_mask):
     return image
 
 def sd_controlnet_inpaint(init_image, mask_image):
-    prompt = "(round bald head, hairless, smoothy head skin, natural skin:1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft \
-    lighting, high quality, film grain, no hair on the scalp, Fujifilm XT3"
+    prompt = "(round bald head, hairless, smoothy head skin, natural skin:1.2), RAW photo, a close up portrait photo, 8k uhd, dslr, soft lighting, high quality, film grain, no hair on the scalp, Fujifilm XT3"
 
     negative_prompt = "(hair, hat, eyes, wrinkle, bright forehead skin, strong lighting, black contour, skin spots, black edges, skin black wrinkles:2), deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, \
     drawing, anime,  text, close up, cropped, out of frame, worst quality, low \
@@ -174,7 +184,7 @@ def sd_controlnet_inpaint(init_image, mask_image):
                     strength = 1, mask_image=mask_image, \
                     control_image=control_image, \
                     num_inference_steps=30, guidance_scale=7.5, height=HEIGHT, width=WIDTH, \
-                    generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
+                    generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]   
     return image
 
 def generate_final_result(image_path):
@@ -184,6 +194,7 @@ def generate_final_result(image_path):
         return None
     mask_image = mask_image.resize((WIDTH, HEIGHT))
     result_image = sd_controlnet_inpaint(init_image, mask_image)
+    #result_image = facial_dermabrasion_effect(np.array(result_image))
     mask = np.array(mask_image.resize((WIDTH, HEIGHT)))/255.0
     mask = np.expand_dims(mask, axis=2)
     result = mask * np.array(result_image) + (1 - mask) * np.array(init_image.resize((WIDTH,HEIGHT)))
