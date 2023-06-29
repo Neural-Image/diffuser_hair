@@ -110,6 +110,8 @@ def get_hair_mask(image_path):
     face_pixel = np.count_nonzero(lower_face_mask == 255)
     #Get hair mask
     hair_mask = get_specific_mask(vis_seg_probs, 10, 10)
+    #Get hat mask
+    hat_mask = get_specific_mask(vis_seg_probs, 16, 16)
     #Get ear mask
     ear_mask = get_specific_mask(vis_seg_probs, 1, 1)
     ear_mask[0,:,face_left_x:face_right_x] = 0
@@ -133,11 +135,13 @@ def get_hair_mask(image_path):
     eye_mask = np.expand_dims(dilate_mask(np.squeeze(eye_mask[0]), dilate_kernal_size//2), 0)
     lower_face_mask = np.expand_dims(erode_mask(np.squeeze(lower_face_mask[0]), int(2* dilate_kernal_size)), 0)
     upper_face_mask = np.expand_dims(upper_face_mask[0,:,:],0)
-    eye_brow_mask = np.expand_dims(eye_brow_mask [0,:,:],0)
-    ear_mask = np.expand_dims(ear_mask [0,:,:],0)
+    eye_brow_mask = np.expand_dims(eye_brow_mask[0,:,:],0)
+    hat_mask = np.expand_dims(hat_mask[0,:,:],0)
+    ear_mask = np.expand_dims(ear_mask[0,:,:],0)
     #Mask out the eye area in the final mask
     #print(upper_face_mask.shape)
     mask_img[upper_face_mask==255] = 255
+    mask_img[hat_mask==255] = 255
     mask_img[eye_mask == 255] = 0
     mask_img[eye_brow_mask == 255] = 0
     mask_img[lower_face_mask == 255] = 0
