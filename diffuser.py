@@ -52,7 +52,7 @@ def get_hair_mask(image_path):
     face_aligner = facer.face_aligner('farl/ibug300w/448', device=device) # optional: "farl/wflw/448", "farl/aflw19/448"
     with torch.inference_mode():
         faces_a = face_aligner(image, faces)
-    img = cv2.imread(image_path)[..., ::-1]
+    #img = cv2.imread(image_path)[..., ::-1]
     #vis_img = img.copy()
     for pts in faces_a['alignment']:
         pts = pts.cpu().numpy()
@@ -67,7 +67,7 @@ def get_hair_mask(image_path):
         face_right_point = pts[16:17,:]
         face_horizontal_size = face_right_point[0][0] - face_left_point[0][0]
         pts = pts[9:15,:]
-        divider = int(face_horizontal_size // 25)
+        divider = int(face_horizontal_size // 30)
         left_half_face[:,0] = left_half_face[:,0] + divider
         right_half_face[:,0] = right_half_face[:,0]- divider
         face_pts_rows = left_half_face[:,1].astype(int).tolist() + right_half_face[:,1].astype(int).tolist()
@@ -107,7 +107,7 @@ def get_hair_mask(image_path):
     face_points_in_hair = face_points * hair_mask
     face_points_in_hair = np.count_nonzero(face_points_in_hair == 255)
     if face_points_in_hair > 6:
-        print(f"face points in hair is: {face_points_in_hair} >6, skip")
+        print(f"face points in hair is: {face_points_in_hair} > 6, skip")
         return None
     hair_count = np.count_nonzero(hair_mask == 255)
     lower_hair_count = np.count_nonzero(hair_mask[:,middle_face_y:jaw_point_y,:] == 255)
