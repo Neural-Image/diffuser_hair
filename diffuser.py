@@ -3,11 +3,10 @@ import argparse
 import glob
 import os
 import PIL
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageFilter
 import numpy as np
 import torch
 import facer
-import cv2
 from pathlib import Path
 import tempfile
 from datetime import datetime
@@ -28,6 +27,10 @@ def resize_for_condition_image(input_image: Image, resolution: int):
     W = int(round(W / 64.0)) * 64
     img = input_image.resize((W, H), resample=Image.LANCZOS)
     return img
+
+def square_resize_image(image, size):
+    image = image.resize((size, size), Image.LANCZOS)
+    return image
 
 
 def make_inpaint_condition(image, image_mask):
@@ -84,6 +87,7 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
     #cond_image = resize_for_condition_image(condition_image, 512)
     #mask_image = resize_for_condition_image(mask_image, 512)
 
+
     control_inpaint_image = make_inpaint_condition(init_image, mask_image)
     #print(control_inpaint_image.size())
 
@@ -96,7 +100,8 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
     ]
 
 
-    repo_id = "Lykon/DreamShaper"
+
+    repo_id = "/home/heran/DreamShaper"
 
     pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
         repo_id, controlnet=controlnet, torch_dtype=torch.float16
@@ -109,7 +114,7 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
 
     image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=[control_openpose_image, control_inpaint_image], image=init_image, \
                 strength = 1, mask_image=mask_image, \
-                num_inference_steps=40, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
+                num_inference_steps=30, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
                 generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
 
     return image
@@ -132,6 +137,7 @@ def concatenate_images(images):
 def inpaint(image, include_hair, prompts, negative_prompt):
     # Convert the input NumPy array to a PIL Image
     init_image = Image.fromarray(image).convert("RGB")
+    init_image = resize_for_condition_image(init_image, 768)
 
     # Save the image to a temporary file
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
@@ -140,14 +146,19 @@ def inpaint(image, include_hair, prompts, negative_prompt):
 
     # Now pass the file path to get_head_mask
     mask_image = get_head_mask(temp.name, include_hair=include_hair)
+    mask_img = resize_for_condition_image(mask_image, 768)
 
     # Split the prompts and negative_prompts by line
     prompts = prompts.split('\n')
 
     result_images = []
 
+    print(init_image.size)
+    print(mask_image.size)
+
     for idx, prompt in enumerate(prompts):
         result_image = sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt)
+
         result_images.append(result_image)
 
         # Generate a timestamp for the filename
