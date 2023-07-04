@@ -3,7 +3,7 @@ import argparse
 import glob
 import os
 import PIL
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 import numpy as np
 import torch
 import facer
@@ -20,17 +20,21 @@ from controlnet_aux import OpenposeDetector
 def resize_for_condition_image(input_image: Image, resolution: int):
     input_image = input_image.convert("RGB")
     W, H = input_image.size
-    k = float(resolution) / min(H, W)
-    H *= k
-    W *= k
-    H = int(round(H / 64.0)) * 64
-    W = int(round(W / 64.0)) * 64
+
+    # Pad the image to have a 1:1 aspect ratio
+    if H > W:
+        diff = H - W
+        padding = (diff // 2, 0, diff - (diff // 2), 0)
+    else:
+        diff = W - H
+        padding = (0, diff // 2, 0, diff - (diff // 2))
+    input_image = ImageOps.expand(input_image, padding)
+
+    k = float(resolution) / max(H, W)
+    H = W = int(round(H * k / 64.0)) * 64
+    
     img = input_image.resize((W, H), resample=Image.LANCZOS)
     return img
-
-def square_resize_image(image, size):
-    image = image.resize((size, size), Image.LANCZOS)
-    return image
 
 
 def make_inpaint_condition(image, image_mask):
@@ -83,16 +87,10 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
 
     openpose = OpenposeDetector.from_pretrained('lllyasviel/ControlNet')
     control_openpose_image = openpose(init_image, hand_and_face=True)
-    #print(control_openpose_image.size)
-    #cond_image = resize_for_condition_image(condition_image, 512)
-    #mask_image = resize_for_condition_image(mask_image, 512)
 
 
     control_inpaint_image = make_inpaint_condition(init_image, mask_image)
-    #print(control_inpaint_image.size())
 
-    #control_openpose_image.resize((512, 768), resample=Image.LANCZOS)
-    #control_inpaint_image.resize((512, 768), resample=Image.LANCZOS)
 
     controlnet = [
         ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_openpose", torch_dtype=torch.float16),
@@ -100,21 +98,20 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
     ]
 
 
-
-    repo_id = "/home/heran/DreamShaper"
+    repo_id = "Lykon/DreamShaper"
 
     pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
         repo_id, controlnet=controlnet, torch_dtype=torch.float16
     ).to('cuda')
 
 
-    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
     pipe.enable_xformers_memory_efficient_attention()
     pipe.enable_model_cpu_offload()
 
     image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=[control_openpose_image, control_inpaint_image], image=init_image, \
                 strength = 1, mask_image=mask_image, \
-                num_inference_steps=30, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
+                num_inference_steps=25, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
                 generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
 
     return image
@@ -137,7 +134,7 @@ def concatenate_images(images):
 def inpaint(image, include_hair, prompts, negative_prompt):
     # Convert the input NumPy array to a PIL Image
     init_image = Image.fromarray(image).convert("RGB")
-    init_image = resize_for_condition_image(init_image, 768)
+    init_image = resize_for_condition_image(init_image, 896)
 
     # Save the image to a temporary file
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
@@ -146,7 +143,7 @@ def inpaint(image, include_hair, prompts, negative_prompt):
 
     # Now pass the file path to get_head_mask
     mask_image = get_head_mask(temp.name, include_hair=include_hair)
-    mask_img = resize_for_condition_image(mask_image, 768)
+    mask_img = resize_for_condition_image(mask_image, 896)
 
     # Split the prompts and negative_prompts by line
     prompts = prompts.split('\n')
