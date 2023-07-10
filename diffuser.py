@@ -5,16 +5,54 @@ import os
 import PIL
 from PIL import Image, ImageFilter, ImageOps
 import numpy as np
+import cv2
 import torch
 import facer
 from pathlib import Path
 import tempfile
 from datetime import datetime
 
-from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, DDIMScheduler, EulerAncestralDiscreteScheduler
+from diffusers import StableDiffusionControlNetInpaintPipeline, StableDiffusionImg2ImgPipeline, ControlNetModel, DDIMScheduler, EulerAncestralDiscreteScheduler
 
 from controlnet_aux import OpenposeDetector
 #from clothing_inpaint import get_head_mask, sd_controlnet_inpaint
+
+
+def dilate_mask(mask, kernel_size):
+    # Create a kernel for dilation
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+
+    dilated_mask = cv2.dilate(mask, kernel, iterations=1)
+
+    return dilated_mask
+
+def erode_mask(mask, kernel_size):
+    # Create a kernel for dilation
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    # Perform dilation
+    eroded_mask = cv2.erode(mask, kernel, iterations=1)
+    return eroded_mask
+
+
+def sd_img2img(init_image, stength):
+
+    prompt = "((woman)), soft lighting, 4K, Masterpiece, original facial features, high quality face, high quality hair, realistic"
+    negative_prompt = "disfigured, bad art, deformed, blurry,  morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, ugly, blurry, bad anatomy, bad proportions"
+
+    #src_img = Image.fromarray(init_image.astype(np.uint8))
+    src_img = Image.fromarray(np.array(init_image).astype(np.uint8))
+    src_img.thumbnail((1024,1024))
+
+    #"DGSpitzer/Cyberpunk-Anime-Diffusion" "XpucT/Deliberate"
+    pipe = StableDiffusionImg2ImgPipeline.from_pretrained("/home/heran/DreamShaper/",safety_checker=None, torch_dtype=torch.float16).to('cuda')
+
+    generator = torch.Generator(device='cuda').manual_seed(1024)
+    image = pipe(prompt=prompt, negative_prompt=negative_prompt,image=src_img, strength=stength, guidance_scale=7.5, generator=generator).images[0]
+
+    return image
+
+
+
 
 
 def resize_for_condition_image(input_image: Image, resolution: int):
@@ -47,7 +85,7 @@ def make_inpaint_condition(image, image_mask):
     return image
 
 
-def get_head_mask(image_path, mask_blur = 50, include_hair=True):
+def get_head_mask(image_path, mask_blur = 25, include_hair=True):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -77,6 +115,14 @@ def get_head_mask(image_path, mask_blur = 50, include_hair=True):
     mask_img = mask_img.convert("L")
 
 
+    # Convert the PIL Image back to a numpy array
+    mask_img = np.array(mask_img)
+    mask_img = erode_mask(mask_img, kernel_size=5)
+
+    # After dilation, convert back to PIL Image for blurring
+    mask_img = Image.fromarray(mask_img)
+
+
     mask_img = mask_img.filter(ImageFilter.GaussianBlur(mask_blur))
     mask_img = PIL.ImageOps.invert(mask_img)
     #mask_img.show()
@@ -97,11 +143,14 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
         ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_inpaint", torch_dtype=torch.float16),
     ]
 
-
-    repo_id = "Lykon/DreamShaper"
+    '''
+    pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
+        "Lykon/DreamShaper", controlnet=controlnet, torch_dtype=torch.float16
+    ).to('cuda')
+    '''
 
     pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-        repo_id, controlnet=controlnet, torch_dtype=torch.float16
+        "/home/heran/DreamShaper/", controlnet=controlnet, torch_dtype=torch.float16
     ).to('cuda')
 
 
@@ -134,7 +183,7 @@ def concatenate_images(images):
 def inpaint(image, include_hair, prompts, negative_prompt):
     # Convert the input NumPy array to a PIL Image
     init_image = Image.fromarray(image).convert("RGB")
-    init_image = resize_for_condition_image(init_image, 896)
+    init_image = resize_for_condition_image(init_image, 1024)
 
     # Save the image to a temporary file
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
@@ -143,7 +192,7 @@ def inpaint(image, include_hair, prompts, negative_prompt):
 
     # Now pass the file path to get_head_mask
     mask_image = get_head_mask(temp.name, include_hair=include_hair)
-    mask_img = resize_for_condition_image(mask_image, 896)
+    mask_img = resize_for_condition_image(mask_image, 1024)
 
     # Split the prompts and negative_prompts by line
     prompts = prompts.split('\n')
@@ -155,6 +204,8 @@ def inpaint(image, include_hair, prompts, negative_prompt):
 
     for idx, prompt in enumerate(prompts):
         result_image = sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt)
+        #result_image = sd_img2img(result_image, 0.1)
+
 
         result_images.append(result_image)
 
@@ -164,9 +215,9 @@ def inpaint(image, include_hair, prompts, negative_prompt):
         # Save each individual image in the 'output/images' folder
         result_image.save(f'output/images/image_{idx+1}_{timestamp}.png', 'PNG')
 
-    openpose = OpenposeDetector.from_pretrained('lllyasviel/ControlNet')
-    condition_image = openpose(init_image, hand_and_face=True)
-    result_images.append(condition_image)  # Append the condition image to the end of the list
+    #openpose = OpenposeDetector.from_pretrained('lllyasviel/ControlNet')
+    #condition_image = openpose(init_image, hand_and_face=True)
+    result_images.append(mask_image)  # Append the condition image to the end of the list
 
     # Clean up the temporary file
     os.remove(temp.name)
