@@ -5,6 +5,7 @@ import PIL
 from PIL import Image, ImageOps, ImageFilter
 import numpy as np
 import cv2
+import random
 import torch
 import facer
 from pathlib import Path
@@ -25,11 +26,12 @@ def dilate_mask(mask, kernel_size):
     return dilated_mask
 
 def erode_mask(mask, kernel_size):
-
+    # Create a kernel for dilation
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
-
+    # Perform dilation
     eroded_mask = cv2.erode(mask, kernel, iterations=1)
     return eroded_mask
+
 
 def make_inpaint_condition(image, image_mask):
     image = np.array(image.convert("RGB")).astype(np.float32) / 255.0
@@ -61,7 +63,7 @@ def resize_for_condition_image(input_image: Image, resolution: int):
     return img
 
 
-def get_head_mask(image_path, mask_blur = 40, include_hair=True):
+def get_head_mask(image_path, mask_blur = 50, include_hair=True):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -93,7 +95,8 @@ def get_head_mask(image_path, mask_blur = 40, include_hair=True):
 
     # Convert the PIL Image back to a numpy array
     mask_img = np.array(mask_img)
-    mask_img = erode_mask(mask_img, kernel_size=5)
+
+    mask_img = erode_mask(mask_img, kernel_size=15)
 
     # After dilation, convert back to PIL Image for blurring
     mask_img = Image.fromarray(mask_img)
@@ -124,14 +127,16 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
     ).to('cuda')
 
 
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     pipe.enable_xformers_memory_efficient_attention()
     pipe.enable_model_cpu_offload()
 
+    seed = random.randint(0, 2**32 - 1)
+
     image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=[control_openpose_image, control_inpaint_image], image=init_image, \
                 strength = 1, mask_image=mask_image, \
-                num_inference_steps=25, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
-                generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
+                num_inference_steps=20, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
+                generator=torch.Generator(device="cuda").manual_seed(seed)).images[0]
 
     return image
 
@@ -173,7 +178,7 @@ iface = gr.Interface(
     fn=generate_images,
     inputs=[
         gr.inputs.Textbox(lines=2, placeholder="Enter prompt..."),
-        gr.inputs.Textbox(lines=2, default="nsfw, nudity, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
+        gr.inputs.Textbox(lines=2, default="nsfw, nudity, earring, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
         gr.inputs.Textbox(lines=2, placeholder="Enter input path..."),
         gr.inputs.Textbox(lines=2, placeholder="Enter output path..."),
         gr.inputs.Checkbox(label="Change Hair"),
