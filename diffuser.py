@@ -63,7 +63,7 @@ def resize_for_condition_image(input_image: Image, resolution: int):
     return img
 
 
-def get_head_mask(image_path, mask_blur = 50, include_hair=True):
+def get_head_mask(image_path, mask_blur = 40, include_hair=True):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -96,7 +96,7 @@ def get_head_mask(image_path, mask_blur = 50, include_hair=True):
     # Convert the PIL Image back to a numpy array
     mask_img = np.array(mask_img)
 
-    mask_img = erode_mask(mask_img, kernel_size=15)
+    mask_img = erode_mask(mask_img, kernel_size=10)
 
     # After dilation, convert back to PIL Image for blurring
     mask_img = Image.fromarray(mask_img)
