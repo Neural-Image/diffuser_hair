@@ -16,6 +16,7 @@ from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel,
 
 from controlnet_aux import OpenposeDetector
 
+backgrounds = [", park in background", ", trees in background", ", mountain in background", ", sea in background, blue sky"]
 
 def dilate_mask(mask, kernel_size):
     # Create a kernel for dilation
@@ -166,6 +167,7 @@ def generate_images(prompts, negative_prompt, input_path, output_path, change_ha
 
             # For each prompt, generate an image
             for i, prompt in enumerate(prompts):
+                prompt += random.choice(backgrounds)
                 # Generate image using control net inpainting
                 result_image = sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt)
                 
@@ -178,10 +180,10 @@ iface = gr.Interface(
     fn=generate_images,
     inputs=[
         gr.inputs.Textbox(lines=2, placeholder="Enter prompt..."),
-        gr.inputs.Textbox(lines=2, default="nsfw, nudity, earring, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
+        gr.inputs.Textbox(lines=2, default="big breast, earring, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
         gr.inputs.Textbox(lines=2, placeholder="Enter input path..."),
         gr.inputs.Textbox(lines=2, placeholder="Enter output path..."),
-        gr.inputs.Checkbox(label="Change Hair"),
+        gr.inputs.Checkbox(label="Change Hair", default=True),
     ],
     outputs="text"
 )
