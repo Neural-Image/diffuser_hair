@@ -16,7 +16,7 @@ from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel,
 
 from controlnet_aux import OpenposeDetector
 
-backgrounds = [", park in background", ", trees in background", ", mountain in background", ", sea in background, blue sky"]
+backgrounds = [", park in background", ", trees in background", ", sea in background, blue sky"]
 
 def dilate_mask(mask, kernel_size):
     # Create a kernel for dilation
