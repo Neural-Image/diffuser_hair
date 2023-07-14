@@ -11,12 +11,34 @@ import facer
 from pathlib import Path
 import tempfile
 from datetime import datetime
+import random
 
 from diffusers import StableDiffusionControlNetInpaintPipeline, StableDiffusionImg2ImgPipeline, ControlNetModel, DDIMScheduler, EulerAncestralDiscreteScheduler
 
 from controlnet_aux import OpenposeDetector
 #from clothing_inpaint import get_head_mask, sd_controlnet_inpaint
 
+backgrounds = [", park in background", ", trees in background", ", mountain in background", ", sea in background, blue sky"]
+
+def calculate_face_proportion(PIL_image):
+    # Convert PIL Image to OpenCV format
+    img = np.array(PIL_image)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # Load the Haar cascade xml file for face detection
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    
+    faces = face_cascade.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    
+    # Calculate total face area
+    face_area = np.sum([w * h for (x, y, w, h) in faces])
+    
+    # Calculate the proportion of the image occupied by faces
+    height, width, _ = img.shape
+    total_area = height * width
+    face_proportion = face_area / total_area
+    
+    return face_proportion
 
 def dilate_mask(mask, kernel_size):
     # Create a kernel for dilation
@@ -85,7 +107,7 @@ def make_inpaint_condition(image, image_mask):
     return image
 
 
-def get_head_mask(image_path, mask_blur = 25, include_hair=True):
+def get_head_mask(image_path, kernel_size, mask_blur = 40, include_hair=True):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -99,6 +121,7 @@ def get_head_mask(image_path, mask_blur = 25, include_hair=True):
     vis_seg_probs = seg_probs.argmax(dim=1)
     # Include face, (hair) and face parts in the mask
     #1: Face, 2: Left Eyebrow, 3: Right Eyebrow, 4: Left Eye, 5: Right Eye, 6: Nose, 7: Upper Lip, 8: Inner Mouth, 9: Lower Lip, 10: Hair
+
     mask = ((vis_seg_probs == 1) | 
             (vis_seg_probs == 2) | (vis_seg_probs == 3) |
             (vis_seg_probs == 4) | (vis_seg_probs == 5) |
@@ -108,6 +131,7 @@ def get_head_mask(image_path, mask_blur = 25, include_hair=True):
     if not include_hair:
         mask = mask | (vis_seg_probs == 10)
 
+    #mask = (vis_seg_probs == 0)
 
     mask_img = mask.float().cpu().numpy()*255
     mask_img = mask_img.astype(np.uint8)
@@ -117,7 +141,7 @@ def get_head_mask(image_path, mask_blur = 25, include_hair=True):
 
     # Convert the PIL Image back to a numpy array
     mask_img = np.array(mask_img)
-    mask_img = erode_mask(mask_img, kernel_size=5)
+    mask_img = erode_mask(mask_img, kernel_size=kernel_size)
 
     # After dilation, convert back to PIL Image for blurring
     mask_img = Image.fromarray(mask_img)
@@ -154,14 +178,16 @@ def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
     ).to('cuda')
 
 
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     pipe.enable_xformers_memory_efficient_attention()
     pipe.enable_model_cpu_offload()
 
+    seed = random.randint(0, 2**32 - 1)
+
     image = pipe(prompt=prompt, negative_prompt=negative_prompt, control_image=[control_openpose_image, control_inpaint_image], image=init_image, \
                 strength = 1, mask_image=mask_image, \
-                num_inference_steps=25, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
-                generator=torch.Generator(device="cuda").manual_seed(-1)).images[0]
+                num_inference_steps=20, guidance_scale=7, height=init_image.size[0], width=init_image.size[1], 
+                generator=torch.Generator(device="cuda").manual_seed(seed)).images[0]
 
     return image
 
@@ -180,10 +206,13 @@ def concatenate_images(images):
 
 
 
-def inpaint(image, include_hair, prompts, negative_prompt):
+def inpaint(image, include_hair, kernel_size, prompts, negative_prompt):
     # Convert the input NumPy array to a PIL Image
     init_image = Image.fromarray(image).convert("RGB")
-    init_image = resize_for_condition_image(init_image, 1024)
+    init_image = resize_for_condition_image(init_image, 896)
+
+    #face_proportion = calculate_face_proportion(image)
+    #print(face_proportion)
 
     # Save the image to a temporary file
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
@@ -191,8 +220,8 @@ def inpaint(image, include_hair, prompts, negative_prompt):
         temp.close()  # Close the file so it can be opened by another process
 
     # Now pass the file path to get_head_mask
-    mask_image = get_head_mask(temp.name, include_hair=include_hair)
-    mask_img = resize_for_condition_image(mask_image, 1024)
+    mask_image = get_head_mask(temp.name, kernel_size, include_hair=include_hair)
+    #mask_img = resize_for_condition_image(mask_image, 896)
 
     # Split the prompts and negative_prompts by line
     prompts = prompts.split('\n')
@@ -203,6 +232,7 @@ def inpaint(image, include_hair, prompts, negative_prompt):
     print(mask_image.size)
 
     for idx, prompt in enumerate(prompts):
+        prompt += random.choice(backgrounds)
         result_image = sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt)
         #result_image = sd_img2img(result_image, 0.1)
 
@@ -236,9 +266,10 @@ iface = gr.Interface(
     fn=inpaint, 
     inputs=[
         gr.inputs.Image(source="upload"),
-        gr.inputs.Checkbox(label="Change Hair"),
+        gr.inputs.Checkbox(label="Change Hair", default=True),
+        gr.inputs.Slider(minimum=0, maximum=50, default=5, label="Erosion"),  # Add a new Slider input for kernel size
         gr.inputs.Textbox(lines=10, label="Prompts"),
-        gr.inputs.Textbox(lines=4, label="Negative Prompts", default="NSFW, nudity, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
+        gr.inputs.Textbox(lines=4, label="Negative Prompts", default="big breast, earring, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
     ], 
     outputs=gr.outputs.Image(type='pil', label="Output Image"),
 )
