@@ -11,19 +11,20 @@ import facer
 from pathlib import Path
 import tempfile
 import gradio as gr
-from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel, DDIMScheduler, \
-    EulerAncestralDiscreteScheduler, StableDiffusionInpaintPipeline
-from controlnet_aux import OpenposeDetector
+from diffusers import DDIMScheduler, EulerAncestralDiscreteScheduler, StableDiffusionInpaintPipeline
+
 from MODCDGnet_8_23_new import mod_cdgnet
+
 import json
 
 # Load the JSON data into a Python dictionary
-with open('1prompt.json', 'r') as file:
+#with open('1prompt.json', 'r') as file:
 #with open('1image_8_27.json', 'r') as file:
-#with open('1image_8_30.json', 'r') as file:
+#with open('1image_9_8.json', 'r') as file:
+with open('10prompt_9_15.json', 'r') as file:
     data = json.load(file)
 
-gender = 'f'  # or 'm'
+gender = 'm'  # or 'm'
 
 position_third = None
 
@@ -82,9 +83,8 @@ def make_inpaint_condition(image, image_mask):
     image[image_mask > 0.5] = -1.0  # set as masked pixel
     image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
-    #print(f"make_inpaint_condition image is {image}")
-    #image = (image + 1) / 2
     return image
+
 
 def resize_for_condition_image(input_image: Image, resolution: int):
     input_image = input_image.convert("RGB")
@@ -111,7 +111,6 @@ def resize_for_condition_image(input_image: Image, resolution: int):
     return img
 
 
-
 def resize_composition(input_image: Image, resolution):
     global h_face, x_face, y_face, w_face
     
@@ -122,7 +121,7 @@ def resize_composition(input_image: Image, resolution):
     print(f"x_face, y_face, w_face, h_face is {x_face}, {y_face}, {w_face}, {h_face}")
 
     # Target vertical position for the bounding box
-    target_top = H * 0.3
+    target_top = H * 0.25
     target_bottom = H * 0.6
 
     # Scaling factor to fit the bounding box to the target height
@@ -164,7 +163,7 @@ def resize_for_init_image(input_image: Image):
         set_random_third_position()
 
     # Target vertical position for the bounding box
-    target_top = H * 0.3
+    target_top = H * 0.25
     target_bottom = H * 0.6
 
     # Scaling factor to fit the bounding box to the target height
@@ -226,6 +225,21 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
     face_ratio = min(w_face / side, h_face / side)
     #print(f"face_ratio: {face_ratio}")
 
+    if face_ratio < 0.10:
+        factor_1 = 4
+    if .10 <= face_ratio < 0.2:
+        factor_1 = 5
+    if 0.2 <= face_ratio < 0.3:
+        factor_1 = 8
+    if 0.3 <= face_ratio < 0.4:
+        factor_1 = 9
+    if 0.4 <= face_ratio < 0.6:
+        factor_1 = 11
+    if face_ratio >= 0.6:
+        factor_1 = 13
+
+    print(f'face ratio is {factor_1}')
+
 
     hair_mask, face_mask, body_mask = mod_cdgnet(image_path)
     mask_img = resize_for_condition_image(face_mask, resolution)
@@ -235,7 +249,7 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
 
     #print(f"erosion is {int(factor_1/1.5)}, blur is {factor_1//2}")
 
-    mask_img = erode_mask(mask_img, kernel_size=6)
+    mask_img = erode_mask(mask_img, kernel_size=factor_1)
 
     # After dilation, convert back to PIL Image for blurring
     mask_img = Image.fromarray(mask_img)
@@ -246,27 +260,38 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
     return mask_img
 
 
-def sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt):
+def sd_inpaint(init_image, mask_image, prompt, negative_prompt):
 
     #dreamshaper_8Inpainting.safetensors
     #realisticVisionV51_v51VAE-inpainting.safetensors
-    pipe = StableDiffusionInpaintPipeline.from_single_file("/home/heran/realistic-vision-inpaint/realisticVisionV51_v51VAE-inpainting.safetensors",safety_checker=None, use_safetensors=True, torch_dtype=torch.float16).to('cuda')
+    pipe = StableDiffusionInpaintPipeline.from_single_file("/home/heran/realistic-vision-inpaint/realisticVisionV51_v51VAE-inpainting.safetensors", torch_dtype=torch.float16, use_safetensors=True).to('cuda')
 
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     pipe.enable_xformers_memory_efficient_attention()
 
     #pipe.load_textual_inversion("/home/heran/DreamShaper/BadDream.pt", token="BadDream")
-    pipe.load_textual_inversion("/home/heran/DreamShaper/UnrealisticDream.pt", token="UnrealisticDream")
+    #pipe.load_textual_inversion("/home/heran/DreamShaper/UnrealisticDream.pt", token="UnrealisticDream")
+    #pipe.unet.load_attn_procs("/home/heran/realistic-vision-inpaint/koreanDollLikeness.safetensors")
+
+    pipe.load_lora_weights("/home/heran/realistic-vision-inpaint", weight_name="koreanDollLikeness.safetensors")
+
+    # Disables safety checksimac 
+    def disabled_safety_checker(images, clip_input):
+        if len(images.shape)==4:
+            num_images = images.shape[0]
+            return images, [False]*num_images
+        else:
+            return images, False
+    pipe.safety_checker = disabled_safety_checker
 
     seed = random.randint(0, 2 ** 32 - 1)
 
-    image = \
-    pipe(prompt=prompt, negative_prompt=negative_prompt,
+    images = pipe(prompt=prompt, negative_prompt=negative_prompt,
          image=init_image, strength=1, mask_image=mask_image, \
-         num_inference_steps=20, guidance_scale=7.5, height=896, width=672,
-         generator=torch.Generator(device="cuda").manual_seed(seed)).images[0]
+         num_inference_steps=20, guidance_scale=7.5, height=896, width=672, num_images_per_prompt=1, cross_attention_kwargs={"scale": 0.5},
+         generator=torch.Generator(device="cuda").manual_seed(seed)).images
 
-    return image
+    return images
 
 
 
@@ -298,8 +323,8 @@ def generate_images(prompts, negative_prompt, input_path, output_path, change_ha
                 for category in data.keys():
                     prompt, negative_prompt = get_prompts(category, gender)
 
-                    #print(prompt)
-                    #print(negative_prompt)
+                    print(prompt)
+                    print(negative_prompt)
 
                     if prompt is not None:
 
@@ -309,24 +334,21 @@ def generate_images(prompts, negative_prompt, input_path, output_path, change_ha
                         mask_image = resize_composition(ori_mask_image, resolution)
 
                         # Generate image using control net inpainting
-                        result_image = sd_controlnet_inpaint(init_image, mask_image, prompt, negative_prompt)
+                        result_images = sd_inpaint(init_image, mask_image, prompt, negative_prompt)
+                        #print(f'results images are {result_images}')
 
 
-
-                        #JSON
-                        random_number = random.randint(1000, 9999) # Create a unique name to avoid overwriting previous images
-                        output_file = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))[0]}_{category}_{random_number}_{os.path.splitext(image_path)[1]}")
-
-                        #mask_file = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))[0]}_mask_{category}_{random_number}_{os.path.splitext(image_path)[1]}")
-
-
-                        #cropped_file = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))[0]}_cropped_{category}_{random_number}_{os.path.splitext(image_path)[1]}")
+                        for image in enumerate(result_images):
+                            #print(image)
+                            #JSON
+                            random_number = random.randint(1000, 9999) # Create a unique name to avoid overwriting previous images
+                            output_file = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))}_{category}_{random_number}_{os.path.splitext(image_path)[1]}")
 
 
-                        result_image.save(output_file)
+                            image[1].save(output_file)
 
-                        #result_image_cropped.save(cropped_file)
-                        #mask_image.save(mask_file)
+                            #result_image_cropped.save(cropped_file)
+                            #mask_image.save(mask_file)
 
 
 
