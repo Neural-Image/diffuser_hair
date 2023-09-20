@@ -24,8 +24,6 @@ import json
 with open('10prompt_9_15.json', 'r') as file:
     data = json.load(file)
 
-gender = 'm'  # or 'm'
-
 position_third = None
 
 resolution = 896
@@ -33,14 +31,6 @@ resolution = 896
 global w_face, h_face, x_face, y_face
 
 
-def get_prompts(category, gender):
-    prompt = data[category].get(f'prompt_{gender}', None)
-    neg_prompt = data[category].get(f'neg_prompt_{gender}', None)
-
-    if prompt == "None":
-        prompt = None
-    
-    return prompt, neg_prompt
 
 
 def set_random_third_position():
@@ -52,6 +42,8 @@ def set_random_third_position():
     # Choose one of the ranges randomly and then get a random value within that range
     chosen_range = random.choice([left_third_range, right_third_range])
     position_third = random.uniform(chosen_range[0], chosen_range[1])
+
+
 
 def erode_mask(mask, kernel_size):
     # Create a kernel for dilation
@@ -76,16 +68,6 @@ def concatenate_images(images):
 
     return new_img
 
-def make_inpaint_condition(image, image_mask):
-    image = np.array(image.convert("RGB")).astype(np.float32) / 255.0
-    image_mask = np.array(image_mask.convert("L")).astype(np.float32) / 255.0
-    assert image.shape[0:1] == image_mask.shape[0:1], "image and image_mask must have the same image size"
-    image[image_mask > 0.5] = -1.0  # set as masked pixel
-    image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
-    image = torch.from_numpy(image)
-    return image
-
-
 def resize_for_condition_image(input_image: Image, resolution: int):
     input_image = input_image.convert("RGB")
     W, H = input_image.size
@@ -109,7 +91,6 @@ def resize_for_condition_image(input_image: Image, resolution: int):
 
     img = input_image.resize((W, H), resample=Image.LANCZOS)
     return img
-
 
 def resize_composition(input_image: Image, resolution):
     global h_face, x_face, y_face, w_face
@@ -154,7 +135,6 @@ def resize_composition(input_image: Image, resolution):
     new_image = new_image.crop((crop_width, 0, W - crop_width, H))
 
     return new_image
-
 
 def resize_for_init_image(input_image: Image):
     W, H = input_image.size
@@ -201,7 +181,7 @@ def resize_for_init_image(input_image: Image):
     return new_image
 
 
-def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
+def get_head_mask(image_path):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     image = facer.hwc2bchw(facer.read_hwc(image_path)).to(device=device)  # image: 1 x 3 x h x w
     face_detector = facer.face_detector('retinaface/mobilenet', device=device)
@@ -218,7 +198,6 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
     h_face = int(f_box[3] - f_box[1])
     #print(f"w_face is {w_face}, h_face is {h_face}")
 
-    # print('image.shape', image.shape)
     _, _, h, w = image.shape
     side = max(h, w)
 
@@ -238,8 +217,7 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
     if face_ratio >= 0.6:
         factor_1 = 13
 
-    print(f'face ratio is {factor_1}')
-
+    #print(f'face ratio is {factor_1}')
 
     hair_mask, face_mask, body_mask = mod_cdgnet(image_path)
     mask_img = resize_for_condition_image(face_mask, resolution)
@@ -248,7 +226,6 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
     mask_img = np.array(mask_img)
 
     #print(f"erosion is {int(factor_1/1.5)}, blur is {factor_1//2}")
-
     mask_img = erode_mask(mask_img, kernel_size=factor_1)
 
     # After dilation, convert back to PIL Image for blurring
@@ -262,20 +239,12 @@ def get_head_mask(image_path, mask_blur=40, include_hair=True, crop=False):
 
 def sd_inpaint(init_image, mask_image, prompt, negative_prompt):
 
-    #dreamshaper_8Inpainting.safetensors
-    #realisticVisionV51_v51VAE-inpainting.safetensors
     pipe = StableDiffusionInpaintPipeline.from_single_file("/home/heran/realistic-vision-inpaint/realisticVisionV51_v51VAE-inpainting.safetensors", torch_dtype=torch.float16, use_safetensors=True).to('cuda')
-
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
     pipe.enable_xformers_memory_efficient_attention()
-
-    #pipe.load_textual_inversion("/home/heran/DreamShaper/BadDream.pt", token="BadDream")
-    #pipe.load_textual_inversion("/home/heran/DreamShaper/UnrealisticDream.pt", token="UnrealisticDream")
-    #pipe.unet.load_attn_procs("/home/heran/realistic-vision-inpaint/koreanDollLikeness.safetensors")
-
     pipe.load_lora_weights("/home/heran/realistic-vision-inpaint", weight_name="koreanDollLikeness.safetensors")
 
-    # Disables safety checksimac 
+    # Disables safety checks
     def disabled_safety_checker(images, clip_input):
         if len(images.shape)==4:
             num_images = images.shape[0]
@@ -288,86 +257,74 @@ def sd_inpaint(init_image, mask_image, prompt, negative_prompt):
 
     images = pipe(prompt=prompt, negative_prompt=negative_prompt,
          image=init_image, strength=1, mask_image=mask_image, \
-         num_inference_steps=20, guidance_scale=7.5, height=896, width=672, num_images_per_prompt=1, cross_attention_kwargs={"scale": 0.5},
+         num_inference_steps=20, guidance_scale=7.5, height=896, width=672, num_images_per_prompt=3, cross_attention_kwargs={"scale": 0.5},
          generator=torch.Generator(device="cuda").manual_seed(seed)).images
 
     return images
 
 
+def generate_images(image, gender, style):
 
-def generate_images(prompts, negative_prompt, input_path, output_path, change_hair):
-    # Split the prompts by line
-    prompts = prompts.split('\n')
+    # Load JSON file containing style data
+    with open('10prompt_9_15.json', 'r') as f:
+        style_data = json.load(f)
 
-    # Get list of all image files in the input path
-    image_files = glob.glob(os.path.join(input_path, "*"))
+    print("Loaded styles:", style_data.keys())  # Debug line
+    
+    try:
+        selected_style = style_data[style.lower()]
+    except KeyError as e:
+        print(f"KeyError: {e}")  # Debug line
+        return Image.new('RGB', (100, 100), "red")  # Placeholder for error
+    prompt = selected_style[f'prompt_{gender[0].lower()}']
+    negative_prompt = selected_style[f'neg_prompt_{gender[0].lower()}']
 
-    # Process each image
-    for image_path in image_files:
-        #print(f"The image_path is {image_path}")
-        image_grid = []
+    # Convert the input NumPy array to a PIL Image
+    init_image = Image.fromarray(image).convert("RGB")
+    ori_init_image = resize_for_condition_image(init_image, resolution)
 
-        # Generate result image
-        init_image = Image.open(image_path).convert("RGB")
-        ori_init_image = resize_for_condition_image(init_image, resolution)
+    # Save the image to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
+        ori_init_image.save(temp.name)
+        temp.close()  # Close the file so it can be opened by another process
 
-        # Save the image to a temporary file
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp:
-            ori_init_image.save(temp.name)
-            temp.close()  # Close the file so it can be opened by another process
+    # Pass the file path to get_head_mask
+    ori_mask_image = get_head_mask(temp.name)
 
-            ori_mask_image = get_head_mask(temp.name, include_hair=change_hair, crop=True)
+    image_grid = []
 
-            if (w_face > 200 and h_face > 200):           
+    ori_mask_image = get_head_mask(temp.name)
+          
 
-                for category in data.keys():
-                    prompt, negative_prompt = get_prompts(category, gender)
+    if prompt is not None:
 
-                    print(prompt)
-                    print(negative_prompt)
+        set_random_third_position()
 
-                    if prompt is not None:
+        init_image = resize_for_init_image(ori_init_image)
+        mask_image = resize_composition(ori_mask_image, resolution)
 
-                        set_random_third_position()
+        # Generate image using inpainting
+        result_images = sd_inpaint(init_image, mask_image, prompt, negative_prompt)
 
-                        init_image = resize_for_init_image(ori_init_image)
-                        mask_image = resize_composition(ori_mask_image, resolution)
+        for image in enumerate(result_images):
+            image_grid.append(image[1])
 
-                        # Generate image using control net inpainting
-                        result_images = sd_inpaint(init_image, mask_image, prompt, negative_prompt)
-                        #print(f'results images are {result_images}')
+    os.remove(temp.name) # Clean up the temporary file
 
+    # Concatenate the result images into a single image
+    output_image = concatenate_images(image_grid)
 
-                        for image in enumerate(result_images):
-                            #print(image)
-                            #JSON
-                            random_number = random.randint(1000, 9999) # Create a unique name to avoid overwriting previous images
-                            output_file = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))}_{category}_{random_number}_{os.path.splitext(image_path)[1]}")
-
-
-                            image[1].save(output_file)
-
-                            #result_image_cropped.save(cropped_file)
-                            #mask_image.save(mask_file)
-
-
+    return output_image
 
 # Define the Gradio interface
 iface = gr.Interface(
     fn=generate_images,
     inputs=[
-        gr.inputs.Textbox(lines=2, placeholder="Enter prompt..."),
-        gr.inputs.Textbox(lines=2,
-                          default="hat, big breast, earring, (deformed, distorted, disfigured:1.3), poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, (mutated hands and fingers:1.4), disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"),
-        gr.inputs.Textbox(lines=2, default="/home/heran/Documents/easy_wild/women"),
-        gr.inputs.Textbox(lines=2, placeholder="Enter output path..."),
-        gr.inputs.Checkbox(label="Change Hair", default=True),
+        gr.Image(source="upload"),
+        gr.Radio(choices=["Man", "Woman"], label="Choose Gender", default="Woman"),
+        gr.Dropdown(choices=["Winter", "Autumn", "Summer", "Gongzhu", "Songlin", "Xianxia", "Gucheng", "Guilin", "Zhengqi_pengke", "Mountain"], label="Choose Style"),
     ],
-    outputs="text"
+    outputs=gr.Image(type='pil', label="Output Image"),
 )
 
 iface.launch()
-
-# XpucT/Deliberate
-# Lykon/DreamShaper
-# hands, hat, big breast, long neck, BadDream, UnrealisticDream, ear, earring
